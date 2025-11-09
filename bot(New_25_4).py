@@ -1,0 +1,1913 @@
+from typing import Final, List, Dict, Set
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+import gspread
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import os
+import re
+import json
+from telegram.ext import CallbackContext
+import datetime
+import asyncio
+import logging
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytesseract
+from pdf2image import convert_from_path
+from fuzzywuzzy import fuzz
+
+
+# # Token dan Username Bot
+# TOKEN: Final = '7362230851:AAEGuXalERPrzjJvXIYY3I3iRdyM7CTY8HU'
+# BOT_USERNAME: Final = '@diskominfotest_bot'
+
+# # Load kredensial JSON untuk Google API
+# SERVICE_ACCOUNT_FILE = "credentials.json"
+# SPREADSHEET_ID = "1N1S32NH4bTBIBdnmVnGVRibw1VqW4GCmEXZrwl05WxU"
+
+TOKEN: Final = '8116521602:AAFKMElIZp8RluE_4eqVchrdQZTCq-O_zUk'
+BOT_USERNAME: Final = '@kominfoo_bot'
+
+# Konfigurasi Google Drive dan Sheets
+SERVICE_ACCOUNT_FILE = "credentials.json"
+SPREADSHEET_ID = "1wdpE2wgn-OnFZ75LT3agsPCjzIjAVONXs-as63xGivo"
+# FOLDER_ID = "13XaW0qsyE6Cwcd6szdhbGfk4h32bgRnL"
+
+# Set up logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
+# Admin User IDs - Daftar user ID Telegram admin
+ADMIN_IDS = [5546940331]  # Ganti dengan ID admin yang sebenarnya
+
+#5546940331
+#1156760923
+
+# Folder ID untuk setiap layanan
+SERVICE_FOLDERS = {
+    "Pengajuan Tanda Tangan Elektronik": "1bu5W7My0OzaV_w388vhrWRcazM6z3ni7",  # Ganti dengan ID folder yang sesuai
+    "Reset/Permintaan Akun Cpanel": "1wMZflsiaJuwxgF8VSqylAVej-eYx3XIO",    # Ganti dengan ID folder yang sesuai
+    "Permohonan Video Conference": "1eI9SHAGX7QUQnv0J0Uu1zoXHMdr67JG-"      # Ganti dengan ID folder yang sesuai
+}
+
+# Konfigurasi Google Drive dan Sheets
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+drive_service = build("drive", "v3", credentials=creds)
+client = gspread.authorize(creds)
+sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+
+
+
+# Status options for submissions
+STATUS_OPTIONS = ["Diproses", "Disetujui", "Ditolak"]
+DEFAULT_STATUS = "Diproses"
+
+# Dictionary to store user submission mappings
+USER_SUBMISSION_MAP = {}
+
+### PEMBATAS PDF CHEK
+# Format yang diharapkan dengan bagian yang bisa bervariasi diganti dengan regex
+expected_sections = [
+    "SURAT PERINTAH TUGAS",
+    "Menimbang",
+    "Dasar",
+    "Memberi Perintah",
+    "Kepada",
+    "Nama",
+    "NIP",
+    "Jabatan",
+    "Untuk",
+    "Menjadi personil untuk menerima Username dan Password CPanel laman contoh.semarangkota.go.id di Dinas Komunikasi Statistik dan Persandian Kota Semarang",
+    "Melaksanakan tugas dengan sebaik-baiknya."
+]
+
+expected_sections_2 = [
+    "SURAT PERINTAH PERMOHONAN",
+    "Menimbang",
+    "Dasar",
+    "Memberi Permohonan",
+    "Kepada",
+    "Nama",
+    "NIP",
+    "Jabatan",
+    "Untuk",
+    "Dengan ini meminta permohan untuk mendapatkan fasilitas video coference",
+    "Hal-hal yang terkait syarat dan ketentuan yang ada saya terima dan melaksanakan dengan sebaik baiknya."
+]
+def normalize_text(text):
+    """Menghapus spasi tambahan, enter, dan karakter kosong lainnya."""
+    return ' '.join(text.split()).strip()
+
+def extract_text_from_pdf(pdf_path):
+    """Membaca teks dari PDF dengan OCR dan menormalisasinya."""
+    images = convert_from_path(pdf_path)
+    extracted_text = ' '.join([pytesseract.image_to_string(img) for img in images])
+    return normalize_text(extracted_text)
+
+def check_pdf_with_ocr(pdf_path, threshold=70):
+    """Memeriksa apakah teks dalam PDF sesuai dengan format yang diharapkan."""
+    extracted_text = extract_text_from_pdf(pdf_path)
+
+    # Bandingkan tiap bagian dengan fuzzy matching
+    matching_scores = []
+    for section in expected_sections:
+        score = fuzz.partial_ratio(section, extracted_text)
+        matching_scores.append(score)
+    
+    avg_similarity = sum(matching_scores) / len(matching_scores)
+
+    print(f"Hasil OCR (Teks yang diekstrak):\n{extracted_text}")
+    print(f"Tingkat Kemiripan Rata-rata: {avg_similarity:.2f}%")
+
+    return avg_similarity >= threshold  # PDF Sesuai
+
+def check_pdf_with_ocr_2(pdf_path, threshold=70):
+    """Memeriksa apakah teks dalam PDF sesuai dengan format yang diharapkan."""
+    extracted_text = extract_text_from_pdf(pdf_path)
+
+    # Bandingkan tiap bagian dengan fuzzy matching
+    matching_scores = []
+    for section in expected_sections_2:
+        score = fuzz.partial_ratio(section, extracted_text)
+        matching_scores.append(score)
+    
+    avg_similarity = sum(matching_scores) / len(matching_scores)
+
+    print(f"Hasil OCR (Teks yang diekstrak):\n{extracted_text}")
+    print(f"Tingkat Kemiripan Rata-rata: {avg_similarity:.2f}%")
+
+    return avg_similarity >= threshold  # PDF Sesuai
+### PEMBATAS AKHIR PDF CHEK
+
+# Admin command handler
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Anda tidak memiliki akses ke panel admin.")
+        return
+    
+    # Show admin panel with options
+    keyboard = [
+        ["🔎 Lihat Semua Laporan dan Ubah Status"],
+        ["🔍 Filter Laporan"],
+        ["📊 Statistik Laporan"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("Panel Admin", reply_markup=reply_markup)
+    
+async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        return False  # Not an admin
+    
+    # Add handling for Back button
+    if text == "🔙 Kembali":
+        # Check where we should return to
+        if 'admin_filter_mode' in context.user_data:
+            # If we were in filter mode, go back to filter selection
+            keyboard = [
+                ["📅 Filter berdasar Tanggal"],
+                ["👤 Filter berdasar NIP"],
+                ["📋 Filter berdasar Status"],
+                ["🔙 Kembali ke Panel Admin"]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            await update.message.reply_text("Pilih metode filter:", reply_markup=reply_markup)
+            # Clear the filter mode
+            del context.user_data['admin_filter_mode']
+            return True
+        elif 'selected_admin_service' in context.user_data:
+            # If we were viewing a service, go back to service selection
+            await show_services_selection(update, context)
+            return True
+        elif 'admin_viewing_submissions' in context.user_data:
+            # If we were viewing submissions, go back to the list
+            if 'admin_editing_submission' in context.user_data:
+                service = context.user_data['admin_editing_submission']['service']
+                del context.user_data['admin_editing_submission']
+                await show_service_submissions(update, context, service)
+                return True
+        else:
+            # Default to admin panel
+            await admin_command(update, context)
+            return True
+
+    # Admin panel navigation
+    if text == "🔎 Lihat Semua Laporan dan Ubah Status":
+        await show_services_selection(update, context)
+        return True
+    elif text == "🔍 Filter Laporan":
+        keyboard = [
+            ["📅 Filter berdasar Tanggal"],
+            ["👤 Filter berdasar NIP"],
+            ["📋 Filter berdasar Status"],
+            ["🔙 Kembali ke Panel Admin"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text("Pilih metode filter:", reply_markup=reply_markup)
+        return True
+    elif text == "📊 Statistik Laporan":
+        await show_stats(update, context)
+        return True
+    elif text == "🔙 Kembali ke Panel Admin":
+        await admin_command(update, context)
+        return True
+    elif text.startswith("📅 Filter berdasar Tanggal"):
+        context.user_data['admin_filter_mode'] = 'date'
+        await update.message.reply_text("Masukkan rentang tanggal (format: DD/MM/YYYY - DD/MM/YYYY):")
+        return True
+    elif text.startswith("👤 Filter berdasar NIP"):
+        context.user_data['admin_filter_mode'] = 'nip'
+        await update.message.reply_text("Masukkan NIP:")
+        return True
+    elif text.startswith("📋 Filter berdasar Status"):
+        context.user_data['admin_filter_mode'] = 'status'
+        keyboard = [[status] for status in STATUS_OPTIONS]
+        keyboard.append(["🔙 Kembali"])
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text("Pilih status:", reply_markup=reply_markup)
+        return True
+    
+    # Handle filter inputs
+    if 'admin_filter_mode' in context.user_data:
+        filter_mode = context.user_data['admin_filter_mode']
+        
+        if filter_mode == 'date' and re.match(DATE_RANGE_PATTERN, text):
+            # Process date range filter
+            dates = text.split('-')
+            start_date = dates[0].strip()
+            end_date = dates[1].strip()
+            await filter_submissions_by_date(update, context, start_date, end_date)
+            return True
+        elif filter_mode == 'nip' and re.match(NIP_PATTERN, text):
+            # Process NIP filter
+            await filter_submissions_by_nip(update, context, text)
+            return True
+        elif filter_mode == 'status' and text in STATUS_OPTIONS:
+            # Process status filter
+            await filter_submissions_by_status(update, context, text)
+            return True
+    
+    # Handle service selection
+    if text in LAYANAN_STEPS.keys():
+        context.user_data['selected_admin_service'] = text
+        await show_service_submissions(update, context, text)
+        return True
+    
+    # Check if this is a submission ID selection for status update
+    if 'admin_viewing_submissions' in context.user_data and text.isdigit():
+        submission_index = int(text) - 1
+        if submission_index >= 0 and submission_index < len(context.user_data['admin_viewing_submissions']):
+            await show_submission_status_options(update, context, submission_index)
+            return True
+    
+    # Check if this is a status update selection
+    if 'admin_editing_submission' in context.user_data and text in STATUS_OPTIONS:
+        await update_submission_status(update, context, text)
+        return True
+    
+    return False  # Message not handled by admin functions
+
+async def show_submission_status_options(update: Update, context: ContextTypes.DEFAULT_TYPE, submission_index):
+    submissions = context.user_data['admin_viewing_submissions']
+    submission = submissions[submission_index]
+    
+    context.user_data['admin_editing_submission'] = {
+        'service': submission['service'],
+        'row_index': submission['row_index'],
+        'data': submission
+    }
+    
+    keyboard = [[status] for status in STATUS_OPTIONS]
+    keyboard.append(["🔙 Kembali"])
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    message = f"Submission #{submission_index + 1}\n"
+    message += f"Layanan: {submission['service']}\n"
+    message += f"Nama: {submission['data'].get('Nama_Lengkap', 'N/A')}\n"
+    message += f"NIP: {submission['data'].get('NIP_ASN', submission['data'].get('NIP_Pemohon', 'N/A'))}\n"
+    message += f"Status Saat Ini: {submission['status']}\n\n"
+    message += "Pilih status baru:"
+    
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+async def update_submission_status(update: Update, context: ContextTypes.DEFAULT_TYPE, new_status):
+    submission_info = context.user_data['admin_editing_submission']
+    service = submission_info['service']
+    row_index = submission_info['row_index']
+    old_status = submission_info['data']['status']
+    user_id = submission_info['data'].get('user_id', None)
+    
+    if new_status == old_status:
+        await update.message.reply_text(f"Status tidak berubah: {new_status}")
+        return
+    
+    # If status is being changed to "Ditolak", ask for reason
+    if new_status == "Ditolak":
+        context.user_data['pending_rejection'] = {
+            'service': service,
+            'row_index': row_index,
+            'old_status': old_status,
+            'user_id': user_id
+        }
+        await update.message.reply_text("Masukkan alasan penolakan:")
+        return
+    
+    # Otherwise, proceed with the normal status update
+    try:
+        # Get the worksheet
+        worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service)
+        
+        # Get the status column index (we added status at the end of the service fields + 1 for user_id)
+        status_col_index = len(LAYANAN_STEPS[service]) + 1
+        
+        # Update the status in the worksheet
+        worksheet.update_cell(row_index, status_col_index, new_status)
+        
+        await update.message.reply_text(f"✅ Status berhasil diubah dari '{old_status}' menjadi '{new_status}'")
+        
+        # Notify the user about status change
+        if user_id:
+            try:
+                nama = submission_info['data'].get('Nama_Lengkap', 'N/A')
+                nip = submission_info['data'].get('NIP_ASN', submission_info['data'].get('NIP_Pemohon', 'N/A'))
+                
+                notification_message = f"🔔 *PERUBAHAN STATUS PENGAJUAN*\n\n" \
+                                     f"Layanan: {service}\n" \
+                                     f"Nama: {nama}\n" \
+                                     f"NIP: {nip}\n" \
+                                     f"Status: {old_status} ➡️ {new_status}\n\n"
+                
+                if new_status == "Disetujui":
+                    notification_message += "Pengajuan Anda telah disetujui. Terima kasih."
+                
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=notification_message,
+                    parse_mode="Markdown"
+                )
+                
+                # Also update in our local map
+                if int(user_id) in USER_SUBMISSION_MAP:
+                    USER_SUBMISSION_MAP[int(user_id)]['status'] = new_status
+                
+                logger.info(f"Status notification sent to user {user_id}")
+            except Exception as e:
+                logger.error(f"Error sending status notification to user {user_id}: {str(e)}")
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Gagal mengubah status: {str(e)}")
+    
+    # Clear the editing context
+    if 'admin_editing_submission' in context.user_data:
+        del context.user_data['admin_editing_submission']
+    
+    # Return to the submission list
+    await show_service_submissions(update, context, service)
+
+# New function to handle rejection reasons
+async def handle_rejection_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'pending_rejection' not in context.user_data:
+        return False
+    
+    rejection_reason = update.message.text
+    rejection_info = context.user_data['pending_rejection']
+    service = rejection_info['service']
+    row_index = rejection_info['row_index']
+    old_status = rejection_info['old_status']
+    user_id = rejection_info['user_id']
+    
+    try:
+        # Get the worksheet
+        worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service)
+        
+        # Get column indexes
+        status_col_index = len(LAYANAN_STEPS[service]) + 1
+        reason_col_index = status_col_index + 3  # Add a column for rejection reason after timestamp
+        
+        # Update the status and reason in the worksheet
+        worksheet.update_cell(row_index, status_col_index, "Ditolak")
+        worksheet.update_cell(row_index, reason_col_index, rejection_reason)
+        
+        await update.message.reply_text(f"✅ Status berhasil diubah dari '{old_status}' menjadi 'Ditolak'\nAlasan: {rejection_reason}")
+        
+        # Notify the user about status change with reason
+        if user_id:
+            try:
+                # Get submission data from context
+                submission_info = context.user_data.get('admin_editing_submission')
+                if submission_info:
+                    nama = submission_info['data'].get('Nama_Lengkap', 'N/A')
+                    nip = submission_info['data'].get('NIP_ASN', submission_info['data'].get('NIP_Pemohon', 'N/A'))
+                    
+                    notification_message = f"🔔 *PERUBAHAN STATUS PENGAJUAN*\n\n" \
+                                         f"Layanan: {service}\n" \
+                                         f"Nama: {nama}\n" \
+                                         f"NIP: {nip}\n" \
+                                         f"Status: {old_status} ➡️ Ditolak\n\n" \
+                                         f"Alasan penolakan: {rejection_reason}\n\n" \
+                                         f"Silakan hubungi admin untuk informasi lebih lanjut."
+                    
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=notification_message,
+                        parse_mode="Markdown"
+                    )
+                    
+                    # Also update in our local map
+                    if int(user_id) in USER_SUBMISSION_MAP:
+                        USER_SUBMISSION_MAP[int(user_id)]['status'] = "Ditolak"
+                    
+                    logger.info(f"Rejection notification sent to user {user_id}")
+            except Exception as e:
+                logger.error(f"Error sending rejection notification to user {user_id}: {str(e)}")
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Gagal mengubah status: {str(e)}")
+    
+    # Clear the contexts
+    if 'pending_rejection' in context.user_data:
+        del context.user_data['pending_rejection']
+    if 'admin_editing_submission' in context.user_data:
+        del context.user_data['admin_editing_submission']
+    
+    # Return to the submission list
+    await show_service_submissions(update, context, service)
+    return True
+
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats = {}
+    total_submissions = 0
+    
+    try:
+        for service in LAYANAN_STEPS.keys():
+            try:
+                worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service)
+                values = worksheet.get_all_values()
+                
+                if len(values) <= 1:  # Only header row or empty
+                    stats[service] = {"total": 0, "status": {}}
+                    continue
+                
+                # Skip header row
+                data_rows = values[1:]
+                total_for_service = len(data_rows)
+                total_submissions += total_for_service
+                
+                # Status count (status is in the column after all service fields)
+                status_col_idx = len(LAYANAN_STEPS[service])
+                status_counts = {}
+                
+                for row in data_rows:
+                    if len(row) > status_col_idx:
+                        status = row[status_col_idx]
+                        if status in status_counts:
+                            status_counts[status] += 1
+                        else:
+                            status_counts[status] = 1
+                
+                stats[service] = {
+                    "total": total_for_service,
+                    "status": status_counts
+                }
+            except gspread.exceptions.WorksheetNotFound:
+                stats[service] = {"total": 0, "status": {}}
+    
+        # Build stats message
+        message = "*📊 STATISTIK LAPORAN*\n\n"
+        message += f"Total Pengajuan: {total_submissions}\n\n"
+        
+        for service, service_stats in stats.items():
+            message += f"*{service}*\n"
+            message += f"Total: {service_stats['total']}\n"
+            
+            for status, count in service_stats['status'].items():
+                message += f"- {status}: {count}\n"
+            
+            message += "\n"
+        
+        await update.message.reply_text(message, parse_mode="Markdown")
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Gagal mendapatkan statistik: {str(e)}")
+
+async def show_services_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[service] for service in LAYANAN_STEPS.keys()]
+    keyboard.append(["🔙 Kembali ke Panel Admin"])
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("Pilih layanan:", reply_markup=reply_markup)
+
+async def show_service_submissions(update: Update, context: ContextTypes.DEFAULT_TYPE, service):
+    try:
+        worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service)
+        values = worksheet.get_all_values()
+        
+        if len(values) <= 1:  # Only header or empty
+            await update.message.reply_text(f"Tidak ada pengajuan untuk layanan {service}.")
+            return
+        
+        # Get the headers and data
+        headers = values[0]
+        data_rows = values[1:]
+        
+        # Status column index
+        status_col_idx = len(LAYANAN_STEPS[service])
+        user_id_col_idx = status_col_idx + 1  # user_id column is right after status
+        timestamp_col_idx = user_id_col_idx + 1  # timestamp is after user_id
+        
+        # Prepare submission list
+        submissions = []
+        for i, row in enumerate(data_rows, start=2):  # i starts from 2 for sheet row index (1-based and header is row 1)
+            submission = {}
+            for j, header in enumerate(LAYANAN_STEPS[service]):
+                if j < len(row):
+                    submission[header] = row[j]
+            
+            # Add status, user_id, and timestamp if available
+            status = row[status_col_idx] if len(row) > status_col_idx else DEFAULT_STATUS
+            user_id = row[user_id_col_idx] if len(row) > user_id_col_idx else None
+            timestamp = row[timestamp_col_idx] if len(row) > timestamp_col_idx else "N/A"
+            
+            submissions.append({
+                "service": service,
+                "row_index": i,  # Actual row index in the sheet (1-based)
+                "data": submission,
+                "status": status,
+                "user_id": user_id,
+                "timestamp": timestamp
+            })
+        
+        # Store submissions for later reference
+        context.user_data['admin_viewing_submissions'] = submissions
+        
+        # Create the message
+        if submissions:
+            message = f"*DAFTAR PENGAJUAN {service}*\n\n"
+            
+            for i, submission in enumerate(submissions, start=1):
+                nama = submission['data'].get('Nama_Lengkap', 'N/A')
+                nip = submission['data'].get('NIP_ASN', submission['data'].get('NIP_Pemohon', 'N/A'))
+                status = submission['status']
+                timestamp = submission['timestamp']
+                
+                message += f"{i}. {nama} ({nip})\n"
+                message += f"   Status: {status}\n"
+                message += f"   Waktu: {timestamp}\n\n"
+                
+                # If message becomes too long, send it and start a new one
+                if len(message) > 3500:
+                    await update.message.reply_text(message, parse_mode="Markdown")
+                    message = "*(Lanjutan...)*\n\n"
+            
+            message += "Pilih nomor pengajuan untuk mengelola status."
+            await update.message.reply_text(message, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"Tidak ada pengajuan untuk layanan {service}.")
+    
+    except gspread.exceptions.WorksheetNotFound:
+        await update.message.reply_text(f"Belum ada pengajuan untuk layanan {service}.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+DATE_RANGE_PATTERN = r'^\d{1,2}/\d{1,2}/\d{4}\s*-\s*\d{1,2}/\d{1,2}/\d{4}$'
+NIP_PATTERN = r'^\d{18}$'
+
+async def filter_submissions_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE, start_date=None, end_date=None):
+    # Jika pesan adalah tombol Kembali, tangani secara khusus
+    if update.message.text == "🔙 Kembali":
+        # Hapus mode filter dan kembali ke menu filter
+        if 'admin_filter_mode' in context.user_data:
+            del context.user_data['admin_filter_mode']
+        
+        keyboard = [
+            ["📅 Filter berdasar Tanggal"],
+            ["👤 Filter berdasar NIP"],
+            ["📋 Filter berdasar Status"],
+            ["🔙 Kembali ke Panel Admin"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text("Pilih metode filter:", reply_markup=reply_markup)
+        return True
+    
+    # Sisa fungsi tetap sama...
+    # Jika parameter tanggal tidak diberikan, artinya ini adalah input dari user
+    if start_date is None and end_date is None:
+        date_range_input = update.message.text
+        
+        # Validasi format rentang tanggal
+        if not re.match(DATE_RANGE_PATTERN, date_range_input):
+            keyboard = [["🔙 Kembali"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            await update.message.reply_text(
+                "❌ Format tanggal tidak valid. Gunakan format DD/MM/YYYY - DD/MM/YYYY\n"
+                "Contoh: 01/03/2024 - 31/03/2024", 
+                reply_markup=reply_markup
+            )
+            # Tetap pada mode filter tanggal untuk memungkinkan user mencoba lagi
+            context.user_data['admin_filter_mode'] = 'date'
+            return False
+            
+        # Pisahkan tanggal awal dan akhir
+        try:
+            date_parts = date_range_input.split("-")
+            start_date = date_parts[0].strip()
+            end_date = date_parts[1].strip()
+        except Exception:
+            keyboard = [["🔙 Kembali"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            await update.message.reply_text(
+                "❌ Format tanggal tidak valid. Gunakan format DD/MM/YYYY - DD/MM/YYYY\n"
+                "Contoh: 01/03/2024 - 31/03/2024", 
+                reply_markup=reply_markup
+            )
+            # Tetap pada mode filter tanggal
+            context.user_data['admin_filter_mode'] = 'date'
+            return False
+    
+    # Parse dates to datetime objects
+    from datetime import datetime
+    try:
+        start_dt = datetime.strptime(start_date, "%d/%m/%Y")
+        end_dt = datetime.strptime(end_date, "%d/%m/%Y")
+        
+        # Pastikan tanggal awal tidak lebih besar dari tanggal akhir
+        if start_dt > end_dt:
+            keyboard = [["🔙 Kembali"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            await update.message.reply_text(
+                "❌ Tanggal awal tidak boleh lebih besar dari tanggal akhir.", 
+                reply_markup=reply_markup
+            )
+            # Tetap pada mode filter tanggal
+            context.user_data['admin_filter_mode'] = 'date'
+            return False
+            
+    except ValueError:
+        keyboard = [["🔙 Kembali"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            "❌ Format tanggal tidak valid. Gunakan format DD/MM/YYYY.\n"
+            "Contoh: 01/03/2024 - 31/03/2024", 
+            reply_markup=reply_markup
+        )
+        # Tetap pada mode filter tanggal
+        context.user_data['admin_filter_mode'] = 'date'
+        return False
+    
+    try:
+        all_filtered_submissions = []
+        
+        for service in LAYANAN_STEPS.keys():
+            try:
+                worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service)
+                values = worksheet.get_all_values()
+                
+                if len(values) <= 1:
+                    continue
+                
+                headers = values[0]
+                data_rows = values[1:]
+                
+                # Status and timestamp column indexes
+                status_col_idx = len(LAYANAN_STEPS[service])
+                user_id_col_idx = status_col_idx + 1
+                timestamp_col_idx = user_id_col_idx + 1
+                
+                for i, row in enumerate(data_rows, start=2):
+                    if len(row) <= timestamp_col_idx:
+                        continue
+                    
+                    timestamp_str = row[timestamp_col_idx]
+                    try:
+                        # Parse the timestamp - adjust format if needed
+                        submission_dt = datetime.strptime(timestamp_str.split(" ")[0], "%d/%m/%Y")
+                        
+                        # Check if the date is in range
+                        if start_dt <= submission_dt <= end_dt:
+                            submission = {}
+                            for j, header in enumerate(LAYANAN_STEPS[service]):
+                                if j < len(row):
+                                    submission[header] = row[j]
+                            
+                            status = row[status_col_idx] if len(row) > status_col_idx else DEFAULT_STATUS
+                            user_id = row[user_id_col_idx] if len(row) > user_id_col_idx else None
+                            
+                            all_filtered_submissions.append({
+                                "service": service,
+                                "row_index": i,
+                                "data": submission,
+                                "status": status,
+                                "user_id": user_id,
+                                "timestamp": timestamp_str
+                            })
+                    except Exception as e:
+                        logger.error(f"Error parsing date {timestamp_str}: {str(e)}")
+            
+            except gspread.exceptions.WorksheetNotFound:
+                continue
+        
+        # Store and display filtered submissions
+        context.user_data['admin_viewing_submissions'] = all_filtered_submissions
+        
+        if all_filtered_submissions:
+            message = f"*HASIL FILTER TANGGAL {start_date} - {end_date}*\n\n"
+            
+            for i, submission in enumerate(all_filtered_submissions, start=1):
+                service = submission['service']
+                nama = submission['data'].get('Nama_Lengkap', 'N/A')
+                nip = submission['data'].get('NIP_ASN', submission['data'].get('NIP_Pemohon', 'N/A'))
+                status = submission['status']
+                timestamp = submission['timestamp']
+                
+                message += f"{i}. {service}\n"
+                message += f"   Nama: {nama} ({nip})\n"
+                message += f"   Status: {status}\n"
+                message += f"   Waktu: {timestamp}\n\n"
+                
+                if len(message) > 3500:
+                    await update.message.reply_text(message, parse_mode="Markdown")
+                    message = "*(Lanjutan...)*\n\n"
+            
+            message += "Pilih nomor pengajuan untuk mengelola status."
+            await update.message.reply_text(message, parse_mode="Markdown")
+            # Setelah menampilkan hasil, hapus mode filter
+            if 'admin_filter_mode' in context.user_data:
+                del context.user_data['admin_filter_mode']
+            return True
+        else:
+            keyboard = [["🔙 Kembali"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            await update.message.reply_text(
+                f"Tidak ada pengajuan dalam rentang tanggal {start_date} - {end_date}.", 
+                reply_markup=reply_markup
+            )
+            # Setelah menampilkan hasil (meskipun kosong), hapus mode filter
+            if 'admin_filter_mode' in context.user_data:
+                del context.user_data['admin_filter_mode']
+            return False
+    except Exception as e:
+        keyboard = [["🔙 Kembali"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            f"❌ Error saat melakukan filter: {str(e)}", 
+            reply_markup=reply_markup
+        )
+        # Tetap pada mode filter tanggal
+        context.user_data['admin_filter_mode'] = 'date'
+        return False
+
+async def filter_submissions_by_nip(update: Update, context: ContextTypes.DEFAULT_TYPE, nip):
+    # Verifikasi format NIP
+    if not re.match(VALIDASI_REGEX["NIP"], nip):
+        await update.message.reply_text("Format NIP tidak valid. NIP harus terdiri dari 18 digit angka.")
+        keyboard = [["🔙 Kembali"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text("Silakan coba lagi atau kembali ke menu sebelumnya.", reply_markup=reply_markup)
+        return False
+    
+    try:
+        all_filtered_submissions = []
+        
+        for service in LAYANAN_STEPS.keys():
+            try:
+                worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service)
+                values = worksheet.get_all_values()
+                
+                if len(values) <= 1:
+                    continue
+                
+                headers = values[0]
+                data_rows = values[1:]
+                
+                # Find NIP columns (could be NIP_ASN or NIP_Pemohon)
+                nip_col_indexes = []
+                for idx, header in enumerate(headers):
+                    if header in ["NIP_ASN", "NIP_Pemohon"]:
+                        nip_col_indexes.append(idx)
+                
+                if not nip_col_indexes:
+                    continue
+                
+                # Status column indexes
+                status_col_idx = len(LAYANAN_STEPS[service])
+                user_id_col_idx = status_col_idx + 1
+                timestamp_col_idx = user_id_col_idx + 1
+                
+                for i, row in enumerate(data_rows, start=2):
+                    for nip_idx in nip_col_indexes:
+                        if nip_idx < len(row) and row[nip_idx] == nip:
+                            submission = {}
+                            for j, header in enumerate(LAYANAN_STEPS[service]):
+                                if j < len(row):
+                                    submission[header] = row[j]
+                            
+                            status = row[status_col_idx] if len(row) > status_col_idx else DEFAULT_STATUS
+                            user_id = row[user_id_col_idx] if len(row) > user_id_col_idx else None
+                            timestamp = row[timestamp_col_idx] if len(row) > timestamp_col_idx else "N/A"
+                            
+                            all_filtered_submissions.append({
+                                "service": service,
+                                "row_index": i,
+                                "data": submission,
+                                "status": status,
+                                "user_id": user_id,
+                                "timestamp": timestamp
+                            })
+                            break
+            
+            except gspread.exceptions.WorksheetNotFound:
+                continue
+
+        # Store and display filtered submissions
+        context.user_data['admin_viewing_submissions'] = all_filtered_submissions
+        
+        if all_filtered_submissions:
+            message = f"*HASIL FILTER NIP: {nip}*\n\n"
+            
+            for i, submission in enumerate(all_filtered_submissions, start=1):
+                service = submission['service']
+                nama = submission['data'].get('Nama_Lengkap', 'N/A')
+                status = submission['status']
+                timestamp = submission['timestamp']
+                
+                message += f"{i}. {service}\n"
+                message += f"   Nama: {nama}\n"
+                message += f"   Status: {status}\n"
+                message += f"   Waktu: {timestamp}\n\n"
+            
+            await update.message.reply_text(message, parse_mode="Markdown")
+            return True
+        else:
+            await update.message.reply_text(f"Tidak ada pengajuan dengan NIP {nip}.")
+            # Tambahkan tombol kembali
+            keyboard = [["🔙 Kembali"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            await update.message.reply_text("Silakan kembali ke menu sebelumnya.", reply_markup=reply_markup)
+            return False
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error saat melakukan filter: {str(e)}")
+        return False
+
+async def filter_submissions_by_status(update: Update, context: ContextTypes.DEFAULT_TYPE, status):
+    try:
+        all_filtered_submissions = []
+        
+        for service in LAYANAN_STEPS.keys():
+            try:
+                worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service)
+                values = worksheet.get_all_values()
+                
+                if len(values) <= 1:
+                    continue
+                
+                headers = values[0]
+                data_rows = values[1:]
+                
+                # Status column index
+                status_col_idx = len(LAYANAN_STEPS[service])
+                user_id_col_idx = status_col_idx + 1
+                timestamp_col_idx = user_id_col_idx + 1
+                
+                for i, row in enumerate(data_rows, start=2):
+                    if len(row) > status_col_idx and row[status_col_idx] == status:
+                        submission = {}
+                        for j, header in enumerate(LAYANAN_STEPS[service]):
+                            if j < len(row):
+                                submission[header] = row[j]
+                        
+                        user_id = row[user_id_col_idx] if len(row) > user_id_col_idx else None
+                        timestamp = row[timestamp_col_idx] if len(row) > timestamp_col_idx else "N/A"
+                        
+                        all_filtered_submissions.append({
+                            "service": service,
+                            "row_index": i,
+                            "data": submission,
+                            "status": status,
+                            "user_id": user_id,
+                            "timestamp": timestamp
+                        })
+            
+            except gspread.exceptions.WorksheetNotFound:
+                continue
+        
+        # Store and display filtered submissions
+        context.user_data['admin_viewing_submissions'] = all_filtered_submissions
+        
+        if all_filtered_submissions:
+            message = f"*HASIL FILTER STATUS: {status}*\n\n"
+            
+            for i, submission in enumerate(all_filtered_submissions, start=1):
+                service = submission['service']
+                nama = submission['data'].get('Nama_Lengkap', 'N/A')
+                nip = submission['data'].get('NIP_ASN', submission['data'].get('NIP_Pemohon', 'N/A'))
+                timestamp = submission['timestamp']
+                
+                message += f"{i}. {service}\n"
+                message += f"   Nama: {nama} ({nip})\n"
+                message += f"   Waktu: {timestamp}\n\n"
+                
+                if len(message) > 3500:
+                    await update.message.reply_text(message, parse_mode="Markdown")
+                    message = "*(Lanjutan...)*\n\n"
+            
+            message += "Pilih nomor pengajuan untuk mengelola status."
+            await update.message.reply_text(message, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"Tidak ada pengajuan dengan status {status}.")
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error saat melakukan filter: {str(e)}")
+
+
+
+
+
+# Mapping layanan dan langkah-langkahnya
+LAYANAN_STEPS = {
+    "Pengajuan Tanda Tangan Elektronik": ["Nama_Lengkap", "NIP_ASN", "NIK_KTP", "Nama_OPD", "Nomor_Handphone", "Alamat_Email", "Jabatan"],
+    "Reset/Permintaan Akun Cpanel": ["Nama_Lengkap", "NIP_Pemohon", "Jabatan", "Asal_OPD", "URL_Aplikasi", "Surat_Tugas", "Syarat_dan_Ketentuan"],
+    "Permohonan Video Conference": ["Nama_Lengkap", "NIP_Pemohon", "Nomor_Handphone", "Unit_Kerja", "Nama_Acara", "Tempat", "Tanggal_Mulai", "Tanggal_Selesai", "Waktu", "Estimasi_Jumlah_Partisipan", "Live_Youtube", "Permohonan_Bantuan", "Email_Dinas", "Informasi_Tambahan", "Surat_Permohonan"],
+}
+
+# Regex validasi untuk setiap langkah
+# Menambahkan pola regex ke dalam VALIDASI_REGEX
+VALIDASI_REGEX = {
+    "Nama_Lengkap": r"^[A-Za-z\s\.]{3,50}$",
+    "NIP_ASN": r"^\d{18}$",
+    "NIP_Pemohon": r"^\d{18}$",
+    "NIK_KTP": r"^\d{16}$",
+    "Nama_OPD": r"^[A-Za-z\s\.\,\-]{3,100}$",
+    "Asal_OPD": r"^[A-Za-z\s\.\,\-]{3,100}$",
+    "Unit_Kerja": r"^[A-Za-z\s\.\,\-]{3,100}$",
+    "Nomor_Handphone": r"^(\+62|62|0)8[1-9][0-9]{7,11}$",
+    "Alamat_Email": r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+    "Email_Dinas": r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+    "Jabatan": r"^[A-Za-z\s\.\,\-]{3,50}$",
+    "URL_Aplikasi": r"^(https?:\/\/)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)$",
+    "Nama_Acara": r"^[A-Za-z0-9\s\.\,\-\(\)]{3,100}$",
+    "Tempat": r"^[A-Za-z0-9\s\.\,\-\(\)]{3,100}$",
+    "Tanggal_Mulai": r"^\d{2}\/\d{2}\/\d{4}$",
+    "Tanggal_Selesai": r"^\d{2}\/\d{2}\/\d{4}$",
+    "Waktu": r"^\d{2}:\d{2}(\s?-\s?\d{2}:\d{2})?$",
+    "Estimasi_Jumlah_Partisipan": r"^\d{1,4}$",
+    "Live_Youtube": r"^(Ya|Tidak)$",
+    "Informasi_Tambahan": r"^.{0,200}$",
+    "Date_Range": r'^\d{1,2}/\d{1,2}/\d{4}\s*-\s*\d{1,2}/\d{1,2}/\d{4}$',
+    "NIP": r'^\d{18}$'
+}
+
+# Pesan validasi untuk setiap langkah
+VALIDASI_MESSAGES = {
+    "Nama_Lengkap": "Nama lengkap harus terdiri dari 3-50 karakter (huruf, spasi, titik).",
+    "NIP_ASN": "NIP ASN harus terdiri dari 18 digit angka.",
+    "NIP_Pemohon": "NIP Pemohon harus terdiri dari 18 digit angka.",
+    "NIK_KTP": "NIK KTP harus terdiri dari 16 digit angka.",
+    "Nama_OPD": "Nama OPD harus 3-100 karakter.",
+    "Asal_OPD": "Asal OPD harus 3-100 karakter.",
+    "Unit_Kerja": "Unit Kerja harus 3-100 karakter.",
+    "Nomor_Handphone": "Format nomor handphone tidak valid. Contoh: 08123456789 atau +628123456789.",
+    "Alamat_Email": "Format email tidak valid.",
+    "Email_Dinas": "Format email dinas tidak valid.",
+    "Jabatan": "Jabatan harus 3-50 karakter.",
+    "URL_Aplikasi": "URL Aplikasi tidak valid. Contoh: https://example.com",
+    "Nama_Acara": "Nama acara harus 3-100 karakter.",
+    "Tempat": "Tempat harus 3-100 karakter.",
+    "Tanggal_Mulai": "Format tanggal tidak valid. Gunakan format DD/MM/YYYY.",
+    "Tanggal_Selesai": "Format tanggal tidak valid. Gunakan format DD/MM/YYYY.",
+    "Waktu": "Format waktu tidak valid. Gunakan format HH:MM atau HH:MM - HH:MM.",
+    "Estimasi_Jumlah_Partisipan": "Estimasi jumlah partisipan harus berupa angka (maksimal 4 digit).",
+    "Live_Youtube": "Jawab dengan 'Ya' atau 'Tidak'.",
+    "Informasi_Tambahan": "Informasi tambahan maksimal 200 karakter.",
+}
+
+# File steps - bagian yang memerlukan upload file
+FILE_STEPS = {
+    "Reset/Permintaan Akun Cpanel": ["Surat_Tugas"],
+    "Permohonan Video Conference": ["Surat_Permohonan"]
+}
+
+# Multiple choice options untuk langkah tertentu
+MULTIPLE_CHOICE_STEPS = {
+    "Permohonan Video Conference": {
+        "Permohonan_Bantuan": ["Link online meeting/vidcon", "Pinjam peralatan vidcon", "Personil/operator"]
+    }
+}
+
+# Syarat dan Ketentuan per layanan
+SYARAT_DAN_KETENTUAN = {
+    "Reset/Permintaan Akun Cpanel": """
+Dengan menggunakan layanan ini, Anda setuju untuk:
+1. Bertanggung jawab penuh atas keamanan akun Cpanel
+2. Tidak membagikan kredensial akun kepada pihak yang tidak berwenang
+3. Menggunakan akun hanya untuk keperluan resmi instansi
+4. Mematuhi semua kebijakan keamanan informasi yang berlaku
+5. Melaporkan segera jika terjadi aktivitas mencurigakan pada akun
+
+Apakah Anda setuju dengan syarat dan ketentuan di atas?
+"""
+}
+
+# Fungsi untuk menampilkan syarat dan ketentuan
+async def show_terms_and_conditions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.user_data
+    service = user_data['selected_service']
+    
+    if service in SYARAT_DAN_KETENTUAN:
+        terms_text = SYARAT_DAN_KETENTUAN[service]
+        
+        # Buat inline keyboard untuk setuju/tidak setuju
+        keyboard = [
+            [InlineKeyboardButton("Setuju", callback_data="terms_agree")],
+            [InlineKeyboardButton("Tidak Setuju", callback_data="terms_disagree")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(terms_text, reply_markup=reply_markup)
+    else:
+        # Jika tidak ada syarat dan ketentuan yang didefinisikan, lanjut ke langkah berikutnya
+        await move_to_next_step(update, context)
+
+
+
+
+
+
+# List kata-kata kasar yang akan disensor
+KATA_KASAR = ["anjing", "bangsat", "bego", "bodoh", "goblok", "tolol", "kontol", "memek", "ngentot", "jancok"]
+
+# FAQ untuk layanan yang tersedia
+FAQ = {
+    "tanda tangan elektronik": "Layanan Pengajuan Tanda Tangan Elektronik adalah layanan untuk mendapatkan tanda tangan digital resmi yang memiliki kekuatan hukum. Anda perlu menyediakan data pribadi, NIP ASN, NIK KTP, dan informasi jabatan Anda.",
+    "cpanel": "Layanan Reset/Permintaan Akun Cpanel digunakan untuk mengatur ulang akses atau mendapatkan akun baru untuk mengelola website atau aplikasi. Anda perlu menyertakan surat tugas resmi dan menyetujui syarat dan ketentuan penggunaan.",
+    "video conference": "Layanan Permohonan Video Conference membantu Anda mengadakan rapat atau acara secara online. Layanan ini dapat menyediakan link meeting, peralatan, maupun operator sesuai kebutuhan Anda.",
+    "cara menggunakan bot": "Untuk menggunakan bot ini, silakan ketik /start untuk memulai pengajuan layanan. Pilih layanan yang diinginkan dan ikuti petunjuk untuk mengisi formulir. Jika ada pertanyaan, gunakan /help untuk mendapatkan informasi.",
+    "status pengajuan": "Untuk mengetahui status pengajuan Anda, silakan hubungi admin melalui tombol 'Hubungi Admin' yang tersedia setelah Anda menjalankan perintah /help.",
+    "dokumen yang dibutuhkan": "Dokumen yang dibutuhkan tergantung pada jenis layanan yang Anda pilih. Untuk Tanda Tangan Elektronik dibutuhkan data diri lengkap. Untuk Reset/Permintaan Cpanel dibutuhkan surat tugas. Untuk Video Conference dibutuhkan surat permohonan resmi."
+}
+
+# Fungsi untuk menangani perintah help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Hubungi Admin", url="https://t.me/@Xsuzunny")]  # Ganti dengan username admin Anda
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    help_text = (
+        "👋 Selamat datang di Layanan Bantuan!\n\n"
+        "Anda dapat menanyakan tentang:\n"
+        "- Layanan Tanda Tangan Elektronik\n"
+        "- Layanan Reset/Permintaan Akun Cpanel\n"
+        "- Layanan Permohonan Video Conference\n"
+        "- Cara menggunakan bot\n"
+        "- Status pengajuan\n"
+        "- Dokumen yang dibutuhkan\n\n"
+        "Silakan ketik pertanyaan Anda atau tekan tombol di bawah untuk menghubungi admin langsung."
+    )
+    
+    await update.message.reply_text(help_text, reply_markup=reply_markup)
+    
+    # Tetapkan state pengguna ke 'help_mode'
+    context.user_data['mode'] = 'help_mode'
+
+# Fungsi untuk menyensor kata-kata kasar
+def censor_text(text):
+    # Ubah text menjadi lowercase untuk mempermudah pengecekan
+    text_lower = text.lower()
+    
+    # Cek dan sensor setiap kata kasar
+    for kata in KATA_KASAR:
+        # Gunakan regex untuk mencari kata secara utuh
+        pattern = r'\b' + re.escape(kata) + r'\b'
+        
+        # Fungsi untuk mengganti kata dengan sensor
+        def sensor(match):
+            word = match.group(0)
+            # Pertahankan kapitalisasi asli
+            return '*' * len(word)
+        
+        # Gunakan re.sub dengan fungsi callback untuk mempertahankan kapitalisasi
+        text = re.sub(pattern, sensor, text, flags=re.IGNORECASE)
+    
+    return text
+
+# Fungsi untuk menangani pesan dalam mode help
+async def handle_help_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('mode') != 'help_mode':
+        return False  # Bukan dalam mode help, biarkan handler lain menangani
+    
+    # Sensor kata-kata kasar
+    original_text = update.message.text
+    censored_text = censor_text(original_text)
+    
+    # Cek apakah ada sensor yang dilakukan
+    if censored_text != original_text:
+        await update.message.reply_text("🚫 Mohon gunakan bahasa yang sopan.")
+    
+    # Cari jawaban dari FAQ
+    found_answer = False
+    for keyword, answer in FAQ.items():
+        if keyword in censored_text.lower():
+            await update.message.reply_text(answer)
+            found_answer = True
+            break
+    
+    # Jika tidak menemukan jawaban
+    if not found_answer:
+        keyboard = [
+            [InlineKeyboardButton("Hubungi Admin", url="https://t.me/username_admin")]  # Ganti dengan username admin Anda
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "Maaf, saya tidak dapat menjawab pertanyaan tersebut. "
+            "Silakan hubungi admin langsung untuk bantuan lebih lanjut.",
+            reply_markup=reply_markup
+        )
+    
+    return True  # Pesan telah ditangani
+
+
+
+
+
+spreadsheet = client.open_by_key(SPREADSHEET_ID)  # Ambil objek Spreadsheet
+
+def save_to_google_sheets(user_data, service_name, user_id=None):
+    try:
+        # Coba mendapatkan worksheet yang sudah ada
+        worksheet = client.open_by_key(SPREADSHEET_ID).worksheet(service_name)
+    except gspread.exceptions.WorksheetNotFound:
+        # Jika tidak ada, buat worksheet baru
+        worksheet = client.open_by_key(SPREADSHEET_ID).add_worksheet(title=service_name, rows="1000", cols="22")
+        
+        # Add header with Status, User_ID, and Timestamp columns
+        header_row = LAYANAN_STEPS[service_name] + ["Status", "User_ID", "Timestamp"]
+        worksheet.append_row(header_row)
+        
+        # Get the status column index
+        status_col_index = len(LAYANAN_STEPS[service_name])
+
+        # Set validasi data untuk kolom Status (jika STATUS_OPTIONS sudah didefinisikan)
+        if 'STATUS_OPTIONS' in globals():
+            request = {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 1000,
+                        "startColumnIndex": status_col_index,
+                        "endColumnIndex": status_col_index + 1
+                    },
+                    "rule": {
+                        "condition": {
+                            "type": "ONE_OF_LIST",
+                            "values": [{"userEnteredValue": status} for status in STATUS_OPTIONS]
+                        },
+                        "showCustomUi": True,
+                        "strict": True
+                    }
+                }
+            }
+            
+            # Format header row
+            format_request = {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": len(header_row)
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red": 0.8, "green": 0.8, "blue": 0.8},
+                            "textFormat": {"bold": True},
+                            "horizontalAlignment": "CENTER"
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"
+                }
+            }
+
+            # Format status column
+            status_column_format = {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 1000,
+                        "startColumnIndex": status_col_index,
+                        "endColumnIndex": status_col_index + 1
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "horizontalAlignment": "CENTER"
+                        }
+                    },
+                    "fields": "userEnteredFormat(horizontalAlignment)"
+                }
+            }
+
+            # Apply all formatting
+            client.open_by_key(SPREADSHEET_ID).batch_update({
+                "requests": [
+                    request,  # Data validation
+                    format_request,  # Header formatting
+                    status_column_format  # Status column formatting
+                ]
+            })
+    
+    # Current timestamp
+    current_timestamp = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    
+    # Siapkan data untuk setiap kolom dengan proper handling untuk file links
+    row_data = []
+    for key in LAYANAN_STEPS[service_name]:
+        value = user_data.get(key, "")
+        
+        # Untuk langkah yang memerlukan file, pastikan link disimpan dengan format yang benar
+        if is_file_step(service_name, key) and value:
+            # Cek apakah nilai sudah berupa link
+            if not value.startswith("https://"):
+                # Jika bukan link, tambahkan placeholder
+                value = "File tidak terupload dengan benar"
+        
+        row_data.append(value)
+    
+    # Tambahkan status default (jika DEFAULT_STATUS sudah didefinisikan)
+    status_value = globals().get('DEFAULT_STATUS', 'Pending')
+    row_data.append(status_value)
+    
+    # Tambahkan user_id
+    row_data.append(str(user_id) if user_id else "")
+    
+    # Tambahkan timestamp
+    row_data.append(current_timestamp)
+    
+    # Append row ke worksheet
+    worksheet.append_row(row_data)
+    
+    # Jika user_id tersedia, simpan mapping user dengan pengajuan (jika USER_SUBMISSION_MAP sudah didefinisikan)
+    if user_id and 'USER_SUBMISSION_MAP' in globals():
+        USER_SUBMISSION_MAP[user_id] = {
+            'service': service_name,
+            'nama': user_data.get('Nama_Lengkap', ''),
+            'nip': user_data.get('NIP_ASN', user_data.get('NIP_Pemohon', '')),
+            'timestamp': current_timestamp,
+            'status': status_value
+        }
+    
+    return True
+
+# Fungsi yang lebih aman untuk menghapus file sementara
+def delete_temp_file(file_path):
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"File {file_path} berhasil dihapus")
+    except PermissionError:
+        print(f"Tidak bisa menghapus {file_path} - file sedang digunakan")
+    except Exception as e:
+        print(f"Error saat menghapus {file_path}: {str(e)}")
+
+# Fungsi untuk validasi input berdasarkan regex
+def validate_input(input_text, step_name):
+    if step_name not in VALIDASI_REGEX:
+        return True, ""  # Tidak ada validasi untuk langkah ini
+    
+    pattern = VALIDASI_REGEX[step_name]
+    if re.match(pattern, input_text):
+        return True, ""
+    else:
+        return False, VALIDASI_MESSAGES.get(step_name, f"Format input untuk {step_name.replace('_', ' ')} tidak valid.")
+
+# Fungsi untuk menangani perintah start
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Bersihkan user_data untuk memulai layanan baru
+    context.user_data.clear()
+    
+    # Check if user is admin
+    user_id = update.effective_user.id
+    if user_id in ADMIN_IDS:
+        # Redirect to admin panel directly
+        await admin_command(update, context)
+    else:
+        # Regular user flow
+        keyboard = [[service] for service in LAYANAN_STEPS.keys()]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text('Silakan pilih salah satu layanan berikut:', reply_markup=reply_markup)
+
+# Cek apakah langkah ini memerlukan file
+def is_file_step(service, step_name):
+    return service in FILE_STEPS and step_name in FILE_STEPS[service]
+
+# Cek apakah langkah ini memerlukan pilihan ganda
+def is_multiple_choice_step(service, step_name):
+    return service in MULTIPLE_CHOICE_STEPS and step_name in MULTIPLE_CHOICE_STEPS[service]
+
+# Cek apakah langkah ini adalah syarat dan ketentuan
+def is_terms_step(step_name):
+    return step_name == "Syarat_dan_Ketentuan"
+
+# Fungsi untuk menampilkan pilihan multiple choice dengan kemampuan memilih banyak
+async def show_multiple_choice_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.user_data
+    selected_service = user_data['selected_service']
+    step_index = user_data['step_index']
+    current_step = LAYANAN_STEPS[selected_service][step_index]
+    
+    # Cek jika sudah ada pilihan yang dipilih sebelumnya
+    if f"{current_step}_selected" not in user_data:
+        user_data[f"{current_step}_selected"] = set()
+    
+    # Dapatkan opsi yang tersedia
+    choices = MULTIPLE_CHOICE_STEPS[selected_service][current_step]
+    
+    # Prepare keyboard dengan status pilihan
+    keyboard = []
+    for choice in choices:
+        prefix = "✅ " if choice in user_data[f"{current_step}_selected"] else "⬜ "
+        keyboard.append([f"{prefix}{choice}"])
+    
+    # Tambahkan tombol "Selesai" untuk konfirmasi pilihan
+    keyboard.append(["✓ Selesai Memilih"])
+    
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(
+        f"Pilih {current_step.replace('_', ' ')} (anda bisa memilih lebih dari satu opsi):\n"
+        f"Pilihan anda saat ini: {', '.join(user_data[f'{current_step}_selected']) if user_data[f'{current_step}_selected'] else 'Belum ada'}", 
+        reply_markup=reply_markup
+    )
+
+# Fungsi untuk menangani pesan dari pengguna
+# Fungsi yang dimodifikasi untuk menangani pesan
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Cek apakah dalam mode help
+    if await handle_help_message(update, context):
+        return  # Pesan sudah ditangani oleh handle_help_message
+    
+    # Cek apakah pengguna adalah admin
+    if update.effective_user.id in ADMIN_IDS:
+        text = update.message.text
+        
+        # Tangani tombol kembali terlebih dahulu untuk semua mode
+        if text == "🔙 Kembali":
+            is_admin_handled = await handle_admin_message(update, context)
+            if is_admin_handled:
+                return
+                
+        # Tangani mode filter tanggal
+        if 'admin_filter_mode' in context.user_data and context.user_data['admin_filter_mode'] == 'date':
+            await filter_submissions_by_date(update, context)
+            return
+        
+        # Tangani mode filter NIP
+        if 'admin_filter_mode' in context.user_data and context.user_data['admin_filter_mode'] == 'nip':
+            nip = update.message.text
+            if not re.match(NIP_PATTERN, nip):
+                keyboard = [["🔙 Kembali"]]
+                reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+                await update.message.reply_text("Format NIP tidak valid. NIP harus terdiri dari 18 digit angka.", reply_markup=reply_markup)
+                return
+            await filter_submissions_by_nip(update, context, nip)
+            return
+        
+        # Tangani alasan penolakan
+        if 'pending_rejection' in context.user_data:
+            await handle_rejection_reason(update, context)
+            return
+        
+        # Tangani pesan admin lainnya
+        is_admin_handled = await handle_admin_message(update, context)
+        if is_admin_handled:
+            return
+    # Kode asli handle_message lainnya di sini
+    text = update.message.text
+    user_data = context.user_data
+
+    # Menangani pemilihan layanan
+    if 'selected_service' not in user_data:
+        if text in LAYANAN_STEPS:
+            user_data['selected_service'] = text
+            user_data['step_index'] = 0
+            current_step = LAYANAN_STEPS[text][0]
+            
+            if is_file_step(text, current_step):
+                await update.message.reply_text(f"Silakan unggah file {current_step.replace('_', ' ')} dalam format PDF, JPG, atau PNG.")
+            elif is_multiple_choice_step(text, current_step):
+                await show_multiple_choice_options(update, context)
+            elif is_terms_step(current_step):
+                await show_terms_and_conditions(update, context)
+            else:
+                await update.message.reply_text(f"Silakan masukkan {current_step.replace('_', ' ')}")
+        else:
+            await update.message.reply_text("Silakan pilih layanan yang tersedia dari menu.")
+        return
+
+    selected_service = user_data['selected_service']
+    step_index = user_data['step_index']
+    steps = LAYANAN_STEPS[selected_service]
+    current_step = steps[step_index]
+
+    # Jika langkah ini membutuhkan file, arahkan pengguna untuk mengunggah file
+    if is_file_step(selected_service, current_step):
+        await update.message.reply_text(f"Silakan unggah file {current_step.replace('_', ' ')} dalam format PDF, JPG, atau PNG.")
+        return
+    
+    # Handle multiple choice selection
+    if is_multiple_choice_step(selected_service, current_step):
+        if text == "✓ Selesai Memilih":
+            # Pengguna selesai memilih, gabungkan semua pilihan menjadi string
+            if f"{current_step}_selected" in user_data and user_data[f"{current_step}_selected"]:
+                user_data[current_step] = ", ".join(sorted(user_data[f"{current_step}_selected"]))
+                # Pindah ke langkah berikutnya
+                await move_to_next_step(update, context)
+            else:
+                await update.message.reply_text("Anda harus memilih minimal satu opsi.")
+            return
+        
+        # Proses pilihan multiple choice
+        choices = MULTIPLE_CHOICE_STEPS[selected_service][current_step]
+        for choice in choices:
+            if text == f"⬜ {choice}":
+                # Tambahkan pilihan ke set
+                user_data[f"{current_step}_selected"].add(choice)
+                await show_multiple_choice_options(update, context)
+                return
+            elif text == f"✅ {choice}":
+                # Hapus pilihan dari set
+                user_data[f"{current_step}_selected"].discard(choice)
+                await show_multiple_choice_options(update, context)
+                return
+        
+        # Jika input tidak valid untuk multiple choice
+        await update.message.reply_text("Silakan pilih dari opsi yang tersedia.")
+        await show_multiple_choice_options(update, context)
+        return
+
+    # Validasi input berdasarkan regex
+    is_valid, error_message = validate_input(text, current_step)
+    if not is_valid:
+        await update.message.reply_text(error_message)
+        return
+
+    # Simpan input pengguna
+    user_data[current_step] = text
+
+    # Pindah ke langkah berikutnya
+    await move_to_next_step(update, context)
+
+# Fungsi untuk menangani callback dari tombol inline
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_data = context.user_data
+    selected_service = user_data.get('selected_service')
+    step_index = user_data.get('step_index')
+    
+    if not selected_service or step_index is None:
+        await query.message.reply_text("Sesi Anda telah kedaluwarsa. Silakan mulai ulang dengan /start")
+        return
+    
+    steps = LAYANAN_STEPS[selected_service]
+    current_step = steps[step_index]
+    
+    if query.data == "terms_agree":
+        user_data[current_step] = "Setuju"
+        await query.message.reply_text("✅ Anda telah menyetujui syarat dan ketentuan.")
+        await move_to_next_step(update, context)
+    elif query.data == "terms_disagree":
+        await query.message.reply_text("❌ Permintaan dibatalkan karena Anda tidak menyetujui syarat dan ketentuan.", 
+                                     reply_markup=ReplyKeyboardRemove())
+        user_data.clear()
+
+# Fungsi untuk pindah ke langkah berikutnya
+async def move_to_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.user_data
+    selected_service = user_data['selected_service']
+    step_index = user_data['step_index']
+    steps = LAYANAN_STEPS[selected_service]  # Gunakan steps tanpa status
+
+    if step_index + 1 < len(steps):
+        user_data['step_index'] += 1
+        next_step = steps[user_data['step_index']]
+        
+        if is_file_step(selected_service, next_step):
+            await update.message.reply_text(f"Silakan unggah file {next_step.replace('_', ' ')} dalam format PDF, JPG, atau PNG.")
+        elif is_multiple_choice_step(selected_service, next_step):
+            user_data[f"{next_step}_selected"] = set()
+            if hasattr(update, 'message') and update.message:
+                await show_multiple_choice_options(update, context)
+            else:
+                await update.callback_query.message.reply_text("Menampilkan pilihan...")
+                update_adapter = UpdateAdapter(update.callback_query.message)
+                await show_multiple_choice_options(update_adapter, context)
+        elif is_terms_step(next_step):
+            if hasattr(update, 'message') and update.message:
+                await show_terms_and_conditions(update, context)
+            else:
+                await update.callback_query.message.reply_text("Menampilkan syarat dan ketentuan...")
+                await show_terms_and_conditions(UpdateAdapter(update.callback_query.message), context)
+        else:
+            if hasattr(update, 'message') and update.message:
+                await update.message.reply_text(f"Silakan masukkan {next_step.replace('_', ' ')}:")
+            elif hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.message.reply_text(f"Silakan masukkan {next_step.replace('_', ' ')}:")
+    else:
+
+        # Dapatkan user_id
+        user_id = update.effective_user.id
+
+         # Semua langkah selesai, simpan ke Google Sheets dengan user_id
+        if save_to_google_sheets(user_data, selected_service, user_id):
+            message_obj = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
+            await message_obj.reply_text("✅ Data berhasil disimpan ke Google Sheets.")
+            
+            # Notifikasi ke admin tentang pengajuan baru
+            for admin_id in ADMIN_IDS:
+                try:
+                    nama = user_data.get('Nama_Lengkap', 'N/A')
+                    message = f"🔔 *PENGAJUAN BARU*\n\n" \
+                              f"Layanan: {selected_service}\n" \
+                              f"Nama: {nama}\n" \
+                              f"Status: {DEFAULT_STATUS}\n\n" \
+                              f"Ketik /admin untuk melihat detail"
+                    
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=message,
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending new entry notification to admin {admin_id}: {str(e)}")
+        else:
+            message_obj = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
+            await message_obj.reply_text("❌ Gagal menyimpan data ke Google Sheets.")
+
+        # Tampilkan ringkasan data yang dimasukkan (tanpa status)
+        response = f"Terima kasih, berikut data Anda untuk {selected_service}:\n" + '\n'.join(
+            [f"{key.replace('_', ' ')}: {user_data.get(key, '')}" for key in steps]
+        )
+        
+        message_obj = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
+        await message_obj.reply_text(response, reply_markup=ReplyKeyboardRemove())
+        user_data.clear()
+        
+# Kelas bantuan untuk membuat objek yang kompatibel dengan update.message
+class UpdateAdapter:
+    def __init__(self, message):
+        self.message = message
+
+# Perbaikan fungsi handle_file untuk mengatasi masalah file lock di Windows
+#### Perbaikan fungsi handle_file untuk menangani upload ke Drive dengan benar
+# async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     user_data = context.user_data
+
+#     if 'selected_service' not in user_data:
+#         await update.message.reply_text("Silakan pilih layanan terlebih dahulu dengan mengetik /start")
+#         return
+
+#     selected_service = user_data['selected_service']
+#     step_index = user_data.get('step_index', 0)
+#     steps = LAYANAN_STEPS[selected_service]
+    
+#     if step_index >= len(steps):
+#         await update.message.reply_text("Semua langkah sudah selesai. Ketik /start untuk memulai lagi.")
+#         return
+    
+#     current_step = steps[step_index]
+    
+#     if not is_file_step(selected_service, current_step):
+#         await update.message.reply_text(f"Langkah ini tidak memerlukan file. Silakan masukkan {current_step.replace('_', ' ')}.")
+#         return
+
+#     # File bisa dikirim sebagai document atau photo
+#     if update.message.document:
+#         file = update.message.document
+#         file_name = file.file_name
+#     elif update.message.photo:
+#         file = update.message.photo[-1]  # Ambil kualitas tertinggi
+#         file_name = f"photo_{int(datetime.datetime.now().timestamp())}.jpg"
+#     else:
+#         await update.message.reply_text("Harap kirimkan file yang sesuai (dokumen atau foto).")
+#         return
+    
+#     # Validasi format file jika itu adalah document
+#     if update.message.document:
+#         file_extension = file_name.split(".")[-1].lower()
+#         if file_extension not in ["pdf", "jpg", "jpeg", "png"]:
+#             await update.message.reply_text("Format file tidak didukung. Gunakan PDF, JPG, atau PNG.")
+#             return
+
+#     # Gunakan timestamp untuk menghindari konflik nama file
+#     import time
+#     timestamp = int(time.time())
+#     file_path = f"temp_{timestamp}_{file_name}" if hasattr(file, 'file_name') else f"temp_{timestamp}.jpg"
+    
+#     try:
+#         # Dapatkan info file dan download
+#         file_info = await context.bot.get_file(file.file_id)
+#         await file_info.download_to_drive(file_path)
+        
+#         # Tunggu sebentar untuk memastikan file sudah benar-benar terdownload
+#         await asyncio.sleep(1)
+        
+#         # Periksa apakah file berhasil didownload
+#         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+#             await update.message.reply_text("❌ Gagal mendownload file. Silakan coba lagi.")
+#             return
+        
+#         # Notifikasi file sedang diproses
+#         status_message = await update.message.reply_text("⏳ Sedang mengunggah file ke server...")
+        
+#         # Tentukan folder ID berdasarkan layanan
+#         folder_id = SERVICE_FOLDERS.get(selected_service)
+#         if not folder_id:
+#             await status_message.edit_text("❌ Konfigurasi folder untuk layanan ini tidak ditemukan.")
+#             return
+            
+#         # Upload ke Google Drive
+#         file_metadata = {
+#             "name": file_name if hasattr(file, 'file_name') else f"photo_{timestamp}.jpg",
+#             "parents": [folder_id]
+#         }
+        
+#         # Tentukan mime type
+#         if update.message.document:
+#             mime_type = file.mime_type
+#         else:  # Photo
+#             mime_type = "image/jpeg"
+        
+#         media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+        
+#         try:
+#             # Upload file dengan progress monitoring
+#             uploaded_file = drive_service.files().create(
+#                 body=file_metadata, 
+#                 media_body=media, 
+#                 fields="id,webViewLink"
+#             ).execute()
+            
+#             # Dapatkan link file
+#             file_id = uploaded_file.get('id')
+            
+#             # Ubah permission agar bisa diakses dengan link
+#             drive_service.permissions().create(
+#                 fileId=file_id,
+#                 body={"role": "reader", "type": "anyone"},
+#                 fields="id"
+#             ).execute()
+            
+#             # Dapatkan link sharing yang dapat diakses
+#             file_link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+            
+#             # Simpan link ke user_data
+#             user_data[current_step] = file_link
+            
+#             await status_message.edit_text(f"✅ File {current_step.replace('_', ' ')} berhasil diunggah!")
+#             logger.info(f"File berhasil diupload ke Drive dengan ID: {file_id}")
+            
+#         except Exception as drive_error:
+#             logger.error(f"Error uploading to Drive: {str(drive_error)}")
+#             await status_message.edit_text(f"❌ Gagal mengunggah file ke Drive: {str(drive_error)}")
+#             return
+            
+#     except Exception as e:
+#         logger.error(f"Error handling file: {str(e)}")
+#         await update.message.reply_text(f"❌ Terjadi kesalahan: {str(e)}")
+#         return
+    
+#     finally:
+#         # Pastikan media file ditutup jika ada
+#         if 'media' in locals() and hasattr(media, '_fd') and media._fd:
+#             try:
+#                 media._fd.close()
+#             except:
+#                 pass
+        
+#         # Hapus file sementara
+#         try:
+#             await asyncio.sleep(2)  # Beri waktu untuk memastikan operasi selesai
+#             delete_temp_file(file_path)
+#         except Exception as clean_error:
+#             logger.error(f"Error cleaning up temp file: {str(clean_error)}")
+    
+#     # Lanjutkan ke langkah berikutnya
+#     await move_to_next_step(update, context)
+#### End sebelum diubah
+
+async def upload_to_drive(file_path, file_name, selected_service):
+    # Tentukan folder ID berdasarkan layanan
+    folder_id = SERVICE_FOLDERS.get(selected_service)
+    if not folder_id:
+        return None, "❌ Konfigurasi folder untuk layanan ini tidak ditemukan."
+    
+    # Tentukan mime type
+    mime_type = "application/pdf" if file_name.endswith('.pdf') else "image/jpeg"
+    
+    media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+    
+    try:
+        # Upload file dengan progress monitoring
+        uploaded_file = drive_service.files().create(
+            body={
+                "name": file_name,
+                "parents": [folder_id]
+            }, 
+            media_body=media, 
+            fields="id,webViewLink"
+        ).execute()
+        
+        # Dapatkan link file
+        file_id = uploaded_file.get('id')
+        
+        # Ubah permission agar bisa diakses dengan link
+        drive_service.permissions().create(
+            fileId=file_id,
+            body={"role": "reader", "type": "anyone"},
+            fields="id"
+        ).execute()
+        
+        # Dapatkan link sharing yang dapat diakses
+        file_link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+        
+        return file_link, None  # Kembalikan link dan tidak ada error
+    except Exception as e:
+        return None, f"❌ Gagal mengunggah file ke Drive: {str(e)}"
+    
+#### Update handle_file
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.user_data
+
+    if 'selected_service' not in user_data:
+        await update.message.reply_text("Silakan pilih layanan terlebih dahulu dengan mengetik /start")
+        return
+
+    selected_service = user_data['selected_service']
+    step_index = user_data.get('step_index', 0)
+    steps = LAYANAN_STEPS[selected_service]
+    
+    if step_index >= len(steps):
+        await update.message.reply_text("Semua langkah sudah selesai. Ketik /start untuk memulai lagi.")
+        return
+    
+    current_step = steps[step_index]
+    
+    if not is_file_step(selected_service, current_step):
+        await update.message.reply_text(f"Langkah ini tidak memerlukan file. Silakan masukkan {current_step.replace('_', ' ')}.")
+        return
+
+    # File bisa dikirim sebagai document atau photo
+    if update.message.document:
+        file = update.message.document
+        file_name = file.file_name
+    elif update.message.photo:
+        file = update.message.photo[-1]  # Ambil kualitas tertinggi
+        file_name = f"photo_{int(datetime.datetime.now().timestamp())}.jpg"
+    else:
+        await update.message.reply_text("Harap kirimkan file yang sesuai (dokumen atau foto).")
+        return
+    
+    # Validasi format file jika itu adalah document
+    if update.message.document:
+        file_extension = file_name.split(".")[-1].lower()
+        if file_extension not in ["pdf", "jpg", "jpeg", "png"]:
+            await update.message.reply_text("Format file tidak didukung. Gunakan PDF, JPG, atau PNG.")
+            return
+
+    # Gunakan timestamp untuk menghindari konflik nama file
+    import time
+    timestamp = int(time.time())
+    file_path = f"temp_{timestamp}_{file_name}" if hasattr(file, 'file_name') else f"temp_{timestamp}.jpg"
+    
+    try:
+        # Dapatkan info file dan download
+        file_info = await context.bot.get_file(file.file_id)
+        await file_info.download_to_drive(file_path)
+        
+        # Tunggu sebentar untuk memastikan file sudah benar-benar terdownload
+        await asyncio.sleep(1)
+        
+        # Periksa apakah file berhasil didownload
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            await update.message.reply_text("❌ Gagal mendownload file. Silakan coba lagi.")
+            return
+        
+        # Notifikasi file sedang diproses
+        status_message = await update.message.reply_text("⏳ Sedang memeriksa file...")
+
+        # Cek apakah file PDF sesuai dengan format yang diharapkan
+        if selected_service == "Reset/Permintaan Akun Cpanel" and current_step == "Surat_Tugas":
+            if check_pdf_with_ocr(file_path):
+                await status_message.edit_text("✅ File PDF sesuai dengan format yang diharapkan.")
+                # Simpan link ke user_data
+               # Panggil fungsi untuk mengunggah ke Google Drive
+                file_link, error_message = await upload_to_drive(file_path, file_name, selected_service)
+                
+                if error_message:
+                    await status_message.edit_text(error_message)
+                    return
+                
+                # Simpan link ke user_data
+                user_data[current_step] = file_link  # Simpan link yang diunggah
+                
+                await move_to_next_step(update, context)  # Lanjut ke langkah berikutnya
+            else:
+                await status_message.edit_text("❌ File PDF tidak sesuai dengan format yang diharapkan. Harap kirimkan lagi File yang benar.")
+                return  # Minta pengguna untuk mengupload file lagi
+            
+        ##### SURAT PERMOHONAN: Cek apakah file PDF sesuai dengan format surat permohonan yang diharapkan
+        if selected_service == "Permohonan Video Conference" and current_step == "Surat_Permohonan":
+            if check_pdf_with_ocr_2(file_path):
+                await status_message.edit_text("✅ File PDF sesuai dengan format yang diharapkan.")
+                # Simpan link ke user_data
+               # Panggil fungsi untuk mengunggah ke Google Drive
+                file_link, error_message = await upload_to_drive(file_path, file_name, selected_service)
+                
+                if error_message:
+                    await status_message.edit_text(error_message)
+                    return
+                
+                # Simpan link ke user_data
+                user_data[current_step] = file_link  # Simpan link yang diunggah
+                
+                await move_to_next_step(update, context)  # Lanjut ke langkah berikutnya
+            else:
+                await status_message.edit_text("❌ File PDF tidak sesuai dengan format yang diharapkan. Harap kirimkan lagi File yang benar.")
+                return  # Minta pengguna untuk mengupload file lagi
+        else:
+            # Lanjutkan ke langkah berikutnya untuk file lainnya
+            await move_to_next_step(update, context)
+
+    except Exception as e:
+        logger.error(f"Error handling file: {str(e)}")
+        await update.message.reply_text(f"❌ Terjadi kesalahan: {str(e)}")
+        return
+    
+    finally:
+        # Hapus file sementara
+        # delete_temp_file(file_path)
+          # Pastikan media file ditutup jika ada
+        # if 'media' in locals() and hasattr(media, '_fd') and media._fd:
+        #     try:
+        #         media._fd.close()
+        #     except:
+        #         pass
+        # Hapus file sementara
+        try:
+            await asyncio.sleep(2)  # Beri waktu untuk memastikan operasi selesai
+            delete_temp_file(file_path)
+        except Exception as clean_error:
+            logger.error(f"Error cleaning up temp file: {str(clean_error)}")
+    
+    # Lanjutkan ke langkah berikutnya
+    await move_to_next_step(update, context)
+
+#### Penutupu UPdate handle_File
+# Fungsi error handler
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Error: {context.error}")
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text("Terjadi kesalahan. Silakan coba lagi atau ketik /start untuk memulai ulang.")
+    except:
+        pass
+
+# Konfigurasi bot dan polling
+if __name__ == '__main__':
+    print('Starting bot...')
+    app = Application.builder().token(TOKEN).build()
+    
+    # Tambahkan handlers
+    app.add_handler(CommandHandler('start', start_command))
+    # Di bagian registrasi handler (if __name__ == '__main__':)
+    app.add_handler(CommandHandler('help', help_command))
+    # Pastikan handle_message sudah dimodifikasi seperti di atas
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Add the admin command handler to your app
+    app.add_handler(CommandHandler('admin', admin_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Tambahkan error handler
+    app.add_error_handler(error_handler)
+    
+    print('Polling...')
+    app.run_polling(poll_interval=3)
